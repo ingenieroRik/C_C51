@@ -1,6 +1,10 @@
 /***************************************************************************************************
    23/3/22 comienzo de seguimiento con git                                         
 ****************************************************************************************************
+
+AHORA CON RTC DESDE 25/3/22
+
+
  * File:   
  * Version: 
  * Author: 
@@ -51,15 +55,27 @@ typedef unsigned long int  uint32_t;
 #define on 		1
 #define off 	0
 
+#define Ds1307ReadMode   0xD1u  // DS1307 ID
+#define Ds1307WriteMode  0xD0u  // DS1307 ID
+
+#define Ds1307SecondRegAddress   0x00u    // Address to access Ds1307 SEC register
+#define Ds1307DateRegAddress     0x04u    // Address to access Ds1307 DATE register
+#define Ds1307ControlRegAddress  0x07u    // Address to access Ds1307 CONTROL register
+
 #define DS18B20_SKIP_ROM  0xCC
 #define DS18B20_CONVERT_T 0x44
 #define DS18B20_READ_SCRATCHPAD 0xBE
+
+sbit SCL_PIN = P3^1; //SCL Connected to P3.1
+sbit SDA_PIN = P3^0; //SDA Connected to P3.0
+
+#define SCL_Direction SCL_PIN
+#define SDA_Direction SDA_PIN
 
 uint8_t timer1Count=0;
 uint8_t j = 1;
 
 uint8_t timer0Count=0;
-
 
 uint8_t mascara = 0;
 uint8_t led_i = 0;
@@ -91,13 +107,26 @@ uint8_t u_hor = 0;
 uint8_t d_seg = 0;
 uint8_t u_min = 0;
 uint8_t d_hor = 0;
+uint8_t u_mes = 0;
+uint8_t d_mes = 0;
+uint8_t u_anio = 0;
+uint8_t d_anio = 0;
+uint8_t u_dia = 0;
+uint8_t d_dia = 0;
+
 uint8_t tecla ;
 
+uint8_t sec;
+uint8_t min;
+uint8_t hour;
+uint8_t weekDay;
+uint8_t date;
+uint8_t month;
+uint8_t year;  
 
 unsigned char readdata[2];
 sbit DQ=P3^7;
 unsigned char word1[20]={"TEMP.  "};		//display de 20 caracteres
-
 
 /***************************************************************************************************
                            local function prototypes
@@ -111,10 +140,13 @@ void DELAY_us(uint16_t us_count);
 void beep (void);
 
 void mostrar_hora(int intensidad);
-void borrar_reloj(void);
+//void borrar_reloj(void);
 void actualizar_hora(void);
+static void i2c_Clock(void);
+static void i2c_Ack(void);
+static void i2c_NoAck(void);
 
-/**************************************************************************************************/
+
 /***************************************************************************************************
                              Function prototypes
 ***************************************************************************************************/
@@ -126,7 +158,14 @@ void LCD_Comando(uint8_t cmd);
 void Inicio_Timer_interrupt(void);
 //void timer0_isr() interrupt 1;
 //void timer1_isr() interrupt 3;
-
+void RTC_Init(void);
+void RTC_SetDateTime();
+void RTC_GetDateTime();
+void I2C_Init(void);
+void I2C_Start(void);
+void I2C_Stop(void);
+void I2C_Write(uint8_t );
+uint8_t I2C_Read(uint8_t);
 
 ///////////////ds18b20/////////////////////
 //Delay function
@@ -135,22 +174,273 @@ void delay(unsigned int i)
 {
     while(i--);
 }
+
+void I2C_Init(void)
+ {
  
+ }
+
+/***************************************************************************************************
+                         void I2C_Start(void)
+****************************************************************************************************
+ * I/P Arguments: none.
+ * Return value  : none
+ * description  :This function is used to generate I2C Start Condition.
+                 Start Condition: SDA goes low when SCL is High.
+                               ____________
+                SCL:          |            |
+                      ________|            |______
+                           _________
+                SDA:      |         |
+                      ____|         |____________
+***************************************************************************************************/
+void I2C_Start(void)
+{
+    SCL_PIN = 0;        // Pull SCL low
+    SDA_PIN = 1;        // Pull SDA High
+    DELAY_us(1);
+    SCL_PIN = 1;        //Pull SCL high
+    DELAY_us(1);
+    SDA_PIN = 0;        //Now Pull SDA LOW, to generate the Start Condition
+    DELAY_us(1);
+    SCL_PIN = 0;        //Finally Clear the SCL to complete the cycle
+}
+
+/***************************************************************************************************
+                         void I2C_Stop(void)
+****************************************************************************************************
+ * I/P Arguments: none.
+ * Return value  : none
+ * description  :This function is used to generate I2C Stop Condition.
+                 Stop Condition: SDA goes High when SCL is High.
+                               ____________
+                SCL:          |            |
+                      ________|            |______
+                                 _________________
+                SDA:            |
+                      __________|
+***************************************************************************************************/
+
+void I2C_Stop(void)
+{
+    SCL_PIN = 0;            // Pull SCL low
+    DELAY_us(1);
+    SDA_PIN = 0;            // Pull SDA  low
+    DELAY_us(1);
+    SCL_PIN = 1;            // Pull SCL High
+    DELAY_us(1);
+    SDA_PIN = 1;            // Now Pull SDA High, to generate the Stop Condition
+}
+
+/***************************************************************************************************
+                         void I2C_Write(uint8_t v_i2cData_u8)
+****************************************************************************************************
+ * I/P Arguments: uint8_t-->8bit data to be sent.
+ * Return value  : none
+ * description  :This function is used to send a byte on SDA line using I2C protocol
+                 8bit data is sent bit-by-bit on each clock cycle.
+                 MSB(bit) is sent first and LSB(bit) is sent at last.
+                 Data is sent when SCL is low.
+         ___     ___     ___     ___     ___     ___     ___     ___     ___     ___
+ SCL:   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |
+      __|   |___|   |___|   |___|   |___|   |___|   |___|   |___|   |___|   |___|   |___
+ SDA:    D8       D7     D6      D5      D4       D3      D2      D1      D0     ACK
+***************************************************************************************************/
+void I2C_Write(uint8_t v_i2cData_u8)
+{
+    uint8_t i;
+
+    for(i=0;i<8;i++)                   // loop 8 times to send 1-byte of data
+    {
+        SDA_PIN = v_i2cData_u8 & 0x80;     // Send Bit by Bit on SDA line
+        i2c_Clock();                   // Generate Clock at SCL
+        v_i2cData_u8 = v_i2cData_u8<<1;// Bring the next bit to be transmitted to MSB position
+    }
+                             
+    i2c_Clock();
+}
+
+/***************************************************************************************************
+                         uint8_t I2C_Read(uint8_t v_ackOption_u8)
+****************************************************************************************************
+ * I/P Arguments: none.
+ * Return value  : uint8_t(received byte)
+ * description :This fun is used to receive a byte on SDA line using I2C protocol.
+               8bit data is received bit-by-bit each clock and finally packed into Byte.
+               MSB(bit) is received first and LSB(bit) is received at last.
+         ___     ___     ___     ___     ___     ___     ___     ___     ___     ___
+SCL:    |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |   |
+      __|   |___|   |___|   |___|   |___|   |___|   |___|   |___|   |___|   |___|   |__
+ SDA:    D8       D7     D6      D5       D4     D3       D2      D1     D0      ACK
+***************************************************************************************************/
+uint8_t I2C_Read(uint8_t v_ackOption_u8)
+{
+    uint8_t i, v_i2cData_u8=0x00;
+
+    SDA_PIN =1;               //Make SDA as I/P
+    for(i=0;i<8;i++)     // loop 8times read 1-byte of data
+    {
+        DELAY_us(1);
+        SCL_PIN = 1;         // Pull SCL High
+        DELAY_us(1);
+
+        v_i2cData_u8 = v_i2cData_u8<<1;    //v_i2cData_u8 is Shifted each time and
+        v_i2cData_u8 = v_i2cData_u8 | SDA_PIN; //ORed with the received bit to pack into byte
+
+        SCL_PIN = 0;         // Clear SCL to complete the Clock
+    }
+    if(v_ackOption_u8==1)  /*Send the Ack/NoAck depending on the user option*/
+    {
+        i2c_Ack();
+    }
+    else
+    {
+        i2c_NoAck();
+    }
+
+    return v_i2cData_u8;           // Finally return the received Byte*
+}
+
+/***************************************************************************************************
+                         static void i2c_Clock()
+****************************************************************************************************
+ * I/P Arguments: none.
+ * Return value  : none
+ * description  :This function is used to generate a clock pulse on SCL line.
+***************************************************************************************************/
+static void i2c_Clock(void)
+{
+    DELAY_us(1);
+    SCL_PIN = 1;            // Wait for Some time and Pull the SCL line High
+    DELAY_us(1);        // Wait for Some time
+    SCL_PIN = 0;            // Pull back the SCL line low to Generate a clock pulse
+}
+
+/***************************************************************************************************
+                         static void i2c_Ack()
+****************************************************************************************************
+ * I/P Arguments: none.
+ * Return value  : none
+ * description  :This function is used to generate a the Positive ACK
+                 pulse on SDA after receiving a byte.
+***************************************************************************************************/
+static void i2c_Ack(void)
+{
+    SDA_PIN = 0;        //Pull SDA low to indicate Positive ACK
+    i2c_Clock();    //Generate the Clock
+    SDA_PIN = 1;        // Pull SDA back to High(IDLE state)
+}
+
+/***************************************************************************************************
+                        static void i2c_NoAck()
+****************************************************************************************************
+ * I/P Arguments: none.
+ * Return value  : none
+ * description  :This function is used to generate a the Negative/NO ACK
+                 pulse on SDA after receiving all bytes.
+***************************************************************************************************/
+static void i2c_NoAck(void)
+{
+    SDA_PIN = 1;         //Pull SDA high to indicate Negative/NO ACK
+    i2c_Clock();     // Generate the Clock  
+    SCL_PIN = 1;         // Set SCL 
+}
+
+/***************************************************************************************************
+                     void RTC_GetDateTime(rtc_t *rtc)
+****************************************************************************************************
+* Argumentos I/P: rtc_t *: Puntero a estructura de tipo rtc_t. La estructura contiene hora, min, seg, día, fecha, mes y año
+ * Valor de retorno: ninguno
+ * descripción: esta función se utiliza para obtener la fecha (d, m, a) de Ds1307 RTC.
+    Nota: La lectura de fecha y hora de Ds1307 será de formato BCD,
+          como 0x12,0x39,0x26 para 12 horas, 39 minutos y 26 segundos.
+               0x15,0x08,0x47 para el día 15, el mes 8 y el año 47.              
+***************************************************************************************************/
+void RTC_GetDateTime()
+{
+    I2C_Start();                            // Start I2C communication
+
+    I2C_Write(Ds1307WriteMode);        // connect to DS1307 by sending its ID on I2c Bus
+    I2C_Write(Ds1307SecondRegAddress); // Request Sec RAM address at 00H
+
+    I2C_Stop();                                // Stop I2C communication after selecting Sec Register
+
+    I2C_Start();                            // Start I2C communication
+    I2C_Write(Ds1307ReadMode);            // connect to DS1307(Read mode) by sending its ID
+
+    sec = I2C_Read(1);                // read second and return Positive ACK
+    min = I2C_Read(1);                 // read minute and return Positive ACK
+    hour= I2C_Read(1);               // read hour and return Negative/No ACK
+    weekDay = I2C_Read(1);           // read weekDay and return Positive ACK
+    date= I2C_Read(1);              // read Date and return Positive ACK
+    month=I2C_Read(1);            // read Month and return Positive ACK
+    year =I2C_Read(0);             // read Year and return Negative/No ACK
+
+    I2C_Stop();                              // Stop I2C communication after reading the Date
+	
+	  actualizar_hora();
+}
+
+/***************************************************************************************************
+                    void RTC_SetDateTime(rtc_t *rtc)
+****************************************************************************************************
+* Argumentos I/P: rtc_t *: Puntero a estructura de tipo rtc_t. La estructura contiene hora, min, seg, día, fecha, mes y año
+ * Valor de retorno: ninguno
+ * descripción: esta función se utiliza para actualizar la fecha y la hora de Ds1307 RTC.
+                 La nueva fecha y hora se actualizarán en la memoria no volátil de Ds1307.
+        Nota: La fecha y la hora deben estar en formato BCD,
+             como 0x12,0x39,0x26 para 12 horas, 39 minutos y 26 segundos.
+                  0x15,0x08,0x47 para el día 15, el mes 8 y el año 47.                
+***************************************************************************************************/
+void RTC_SetDateTime()
+{
+    I2C_Start();                          // Start I2C communication
+
+    I2C_Write(Ds1307WriteMode);      // connect to DS1307 by sending its ID on I2c Bus
+    I2C_Write(Ds1307SecondRegAddress); // Request sec RAM address at 00H
+
+    I2C_Write(sec);                    // Write sec from RAM address 00H
+    I2C_Write(min);                    // Write min from RAM address 01H
+    I2C_Write(hour);                    // Write hour from RAM address 02H
+    I2C_Write(weekDay);                // Write weekDay on RAM address 03H
+    I2C_Write(date);                    // Write date on RAM address 04H
+    I2C_Write(month);                    // Write month on RAM address 05H
+    I2C_Write(year);                    // Write year on RAM address 06h
+
+    I2C_Stop();                              // Stop I2C communication after Setting the Date
+}
+
+/***************************************************************************************************
+                         void RTC_Init(void)
+****************************************************************************************************
+ * I/P Arguments: none.
+ * Return value    : none
+ * description :This function is used to Initialize the Ds1307 RTC.
+***************************************************************************************************/
+void RTC_Init(void)
+{
+    I2C_Init();                             // Initialize the I2c module.
+    I2C_Start();                            // Start I2C communication
+
+    I2C_Write(Ds1307WriteMode);        // Connect to DS1307 by sending its ID on I2c Bus
+    I2C_Write(Ds1307ControlRegAddress);// Select the Ds1307 ControlRegister to configure Ds1307
+
+    I2C_Write(0x00);                        // Write 0x00 to Control register to disable SQW-Out
+
+    I2C_Stop();                             // Stop I2C communication after initializing DS1307
+}
+
 //Initialization function
 void Init_DS18B20(void)
 {
     unsigned char x=0;
     DQ = 1;    //DQ reset
-		//DELAY_us(70);
     delay(8);  //Slight delay
     DQ = 0;    //SCM will be pulled down DQ
-		//DELAY_us(480);
     delay(80); //Accurate than 480us delay
     DQ = 1;    //Pulled the bus
-		//DELAY_us(410);
     delay(14);
     x=DQ;      //After slight delay is initialized if x = 0 x = 1 is initialized successfully defeat
-		//DELAY_us(120);
     delay(20);
 }
  
@@ -165,8 +455,7 @@ unsigned char ReadOneChar(void)
       dat>>=1;
       DQ = 1; // To the pulse signal
       if(DQ)
-      dat|=0x80;
-			//DELAY_us(24);			
+      dat|=0x80;		
       delay(4);
     }
     return(dat);
@@ -180,13 +469,11 @@ void WriteOneChar(unsigned char dat)
     {
       DQ = 0;
       DQ = dat&0x01;
-			//DELAY_us(24);
       delay(5);
       DQ = 1;
       dat>>=1;
     }
-    delay(4);
-		//DELAY_us(24);	
+    delay(4);	
 }
  
 //Read temperature
@@ -200,8 +487,7 @@ void  ReadTemperature(void)
     WriteOneChar(0xCC); //Skip read serial number column number of operations
     WriteOneChar(0xBE); //Read the temperature register, etc. (a total of 9 registers readable) is the temperature of the first two
     readdata[0]=ReadOneChar();
-    readdata[1]=ReadOneChar();
-   
+    readdata[1]=ReadOneChar();   
 }
 void Tempprocess() //Temperature Conversion, solo se procesa la temp positiva
 {
@@ -223,81 +509,17 @@ void Tempprocess() //Temperature Conversion, solo se procesa la temp positiva
         word1[10]=(unsigned char )(tt*100-word1[9]*10);
         word1[9]+=48;
         word1[10]+=48;
-				word1[11]=' ';
-				word1[12]=0xdf;  // 11011111 simbolo de grados
+				//word1[11]=' ';
+				word1[11]=0xdf;  // 11011111 simbolo de grados
+				word1[12]=' ';
 				word1[13]=' ';
 				word1[14]=' ';
 				word1[15]=' ';
 				word1[16]=' ';
 				word1[17]=' ';
-				word1[18]=' ';
-	
-	
-	
-	
-	/*
-    if((readdata[1]&0x80)!=0)			//TEMP NEGATIVA
-    {
-			  
-        t=readdata[1];
-        t<<=8;
-        t=t|readdata[0];
-        t=t-1;
-        t=~t;
-        t>>=4;
-        word1[6]=((t/10)%10)+48;
-        word1[7]=t%10+48;
-        temp=readdata[0];
-        temp=temp-1;
-        temp=~temp;
-        temp=temp&0x0f;
-        tt=temp*0.0625;
-        word1[8]='.';
-        word1[9]=(unsigned char )(tt*10);
-        word1[10]=(unsigned char )(tt*100-word1[9]*10);
-        word1[9]+=48;
-        word1[10]+=48;
-				word1[11]=' ';
-				word1[12]=0xdf;  // 11011111 simbolo de grados
-				word1[13]=' ';
-				word1[14]=' ';
-				word1[15]=' ';
-				word1[16]=' ';
-				word1[17]=' ';
-				word1[18]=' ';
-				
-    }
-    else				//TEMP POSITIVA
-    {
-        t=readdata[1];
-        t<<=8;
-        t=t|readdata[0];
-        t>>=4;
-        word1[6]=((t/10)%10)+48;
-        word1[7]=t%10+48;
-        temp=readdata[0];
-        temp=temp&0x0f;
-        tt=temp*0.0625;
-        word1[8]='.';
-        word1[9]=(unsigned char )(tt*10);
-        word1[10]=(unsigned char )(tt*100-word1[9]*10);
-        word1[9]+=48;
-        word1[10]+=48;
-				word1[11]=' ';
-				word1[12]=0xdf;  // 11011111 simbolo de grados
-				word1[13]=' ';
-				word1[14]=' ';
-				word1[15]=' ';
-				word1[16]=' ';
-				word1[17]=' ';
-				word1[18]=' ';
-    }
-		*/
-}
-/////////////////////end  of ds18b20//////////////////
+			}
 
-
-
+// función que muestra hora en el display de 7 segmentos			
 void mostrar_hora(int intensidad)
 {
 						P0 = d_hor;
@@ -338,6 +560,8 @@ void delay_micros(int cnt)
 // funcion para mostrar hora en LCD
 void reloj (void)
 {
+	RTC_GetDateTime();
+	
 	LCD_Comando(0xC0);  //Mover el cursor al comienzo de la segunda línea
 	LCD_Dato(d_hor+48);  // se suma 48 para convertir los numeros en ascii
 	LCD_Dato(u_hor+48);		// y poderlos escribir en el LCD
@@ -347,6 +571,19 @@ void reloj (void)
 	LCD_Dato(':');
 	LCD_Dato(d_seg+48);
 	LCD_Dato(u_seg+48);
+	
+	LCD_Dato(' ');
+	LCD_Dato(' ');
+	
+	LCD_Dato(d_dia+48);  // se suma 48 para convertir los numeros en ascii
+	LCD_Dato(u_dia+48);		// y poderlos escribir en el LCD
+	LCD_Dato('/');
+	LCD_Dato(d_mes+48);
+	LCD_Dato(u_mes+48);
+	LCD_Dato('/');
+	LCD_Dato(d_anio+48);
+	LCD_Dato(u_anio+48);
+	
 	LCD_Comando(0x80); // Mover el cursor al comienzo de la primera línea
 }
 
@@ -475,16 +712,12 @@ void Inicio_Timer_interrupt(void)
 void timer1_isr() interrupt 3
 {  
 	  TR1 = off;
-    //TH1  = 0X4B;         // ReLoad the timer value for 50ms
-    //TL1  = 0XFD;
 		TH1  = 0xEA;         // ReLoad the timer value for 10ms
     TL1  = 0xC7;
-		//TH1  = 0XB8;         // ReLoad the timer value for 20ms
-    //TL1  = 0X08;
 		TR1 = on;
 		teclado();
 	
-		mostrar_hora(10);
+		mostrar_hora(10);                   //MUESTRA HORA EN DISPLAY 7 SEG
 	          /*
 						P0 = d_hor;
 						D1 = on;
@@ -580,8 +813,9 @@ void timer0_isr() interrupt 1
         TL0 = 0x00;
 				TR0 = on;
 			
-				reloj();
+				reloj();			//muestra hora en LCD
 					
+			/*
 				u_seg++;
 				if(u_seg == 10){
 						u_seg=0;
@@ -604,6 +838,7 @@ void timer0_isr() interrupt 1
 														d_hor++;
 												}
 				}}}}
+				*/
 // desplaza led encendido de derecha a izquierda cada 1 segundo				
 			if (led_i<7)
 				{
@@ -728,8 +963,22 @@ void DELAY_ms(uint16_t ms_count)
 
  }
 
-
-
+void actualizar_hora(void)  // el dato que pasa el RTC esta en bcd hh:mm:ss , hay que pasarlos a d_hor u_hor : d_min u_min
+{
+		d_hor = ( hour >> 4);        //desplazo a derecha e inserto ceros a la izquierda
+	  u_hor = (hour & 0x0f) ;      //borro nibble mas alto
+	  d_min = ( min >> 4);         //desplazo a derecha e inserto ceros a la izquierda
+	  u_min = (min & 0x0f) ;       //borro nibble mas alto
+	  d_seg = (sec >> 4);
+		u_seg = (sec & 0x0f) ;
+	
+	  d_dia = ( date >> 4);        //desplazo a derecha e inserto ceros a la izquierda
+	  u_dia = (date & 0x0f) ;      //borro nibble mas alto
+	  d_mes = ( month >> 4);         //desplazo a derecha e inserto ceros a la izquierda
+	  u_mes = (month & 0x0f) ;       //borro nibble mas alto
+	  d_anio = (year >> 4);
+		u_anio = (year & 0x0f) ;
+}
 
 int main() 
 { 
@@ -740,14 +989,33 @@ int main()
     // LCD  2 x 20 lineas, 8 BIT
 		LCD_inicio();		// inicializo con funcion en delay.h
 		LCD_mostrar("   MI RELOJ EN .C   ");
-	     
+	
+/*
+    RTC_Init();
+    hour = 0x20; //  10:40:20 am
+    min =  0x58;
+    sec =  0x00;
+
+    date = 0x25; //  18/01/2022
+    month = 0x03;
+    year = 0x22;
+    weekDay = 5; // Friday: 5th day of week considering monday as first day. 2 es martes.
+
+    /*Establezca la hora y la fecha solo una vez. Una vez configurada la Hora y la Fecha, comenta estas lineas
+         y reflashear el código. De lo contrario, la hora se configurará cada vez que se reinicie el controlador*/
+				 
+    //RTC_SetDateTime();  //  10:40:20 am, 1st Jan 2016
+
+
     while(1)
 		{		
+			
 			  DELAY_ms(500);
 			  if (tecla != NULL){
 						LCD_Comando(0xD3);        // voy a escribir en la direccion 53h de la DDRAM del LCD 
 				    LCD_Dato(tecla);         	// 1 - 1010011 el primer 1 es para indicar direccion											
 				}
+			/*
 				switch (tecla) {
 					case 'C' :					//poner todo a cero
 						borrar_reloj();
@@ -755,70 +1023,23 @@ int main()
 					
 				  case 'D' :
 						tecla = NULL;				
-						actualizar_hora();						
+						//actualizar_hora();						
 						DELAY_ms(2000);
 				    LCD_mostrar("   MI RELOJ EN .C   ");     // mensaje: MI PRIMER RELOJ EN .C						
-						break;				
-				}
+						break;
+         */
+			
+				DELAY_ms(2000);
+				LCD_mostrar("   MI RELOJ EN .C   ");     // mensaje: MI PRIMER RELOJ EN .C	
+				
 				
 				ReadTemperature();
         Tempprocess();
 				
-				DELAY_ms(500);
+				DELAY_ms(2000);
 				
 				LCD_mostrar(word1);
 				
 	}
 }				
 
-
-
-void borrar_reloj(void) {
-						u_seg = 0;
-						d_min = 0;
-					  u_hor = 0;
-						d_seg = 0;
-						u_min = 0;
-						d_hor = 0;
-						tecla = NULL;
-}			
-
-void actualizar_hora(void) {
-		while (tecla == NULL){
-								LCD_mostrar("poner minutos       ");
-						}
-						while (tecla > '9'){
-								LCD_mostrar("numero incorrecto   ");							
-						}
-						u_min = (tecla - 48);		// para pasar de ascii a numero
-						tecla = NULL;
-						while (tecla == NULL){
-								LCD_mostrar("poner dec de minutos");
-						}
-						while (tecla > '6'){
-								LCD_mostrar("numero incorrecto   ");	
-						}						
-						d_min = (tecla - 48);		// para pasar de ascii a numero
-						tecla = NULL;
-						while (tecla == NULL){
-						LCD_mostrar("poner horas         ");
-						}
-						while (tecla > '9'){
-								LCD_mostrar("numero incorrecto   ");
-						}
-						u_hor = (tecla - 48);		// para pasar de ascii a numero
-						tecla = NULL;
-						while (tecla == NULL){
-						LCD_mostrar("poner dec de horas  ");	
-						}
-						while (tecla >= '3'){
-								LCD_mostrar("numero incorrecto   ");
-						}
-						d_hor = (tecla - 48);		  // para pasar de ascii a numero
-						LCD_mostrar("hora actualizada    ");
-						tecla = NULL;
-					}	
-				
-
-				
-	
